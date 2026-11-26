@@ -69,9 +69,10 @@ function todayDisplay() {
   });
 }
 
-function generateId() {
-  return `#T-${1000 + Math.floor(Math.random() * 9000)}`;
-}
+// Ticket numbers are NOT generated here any more. The database assigns them
+// from the `ticket_number_seq` sequence (see the default on tickets.id), so
+// numbers are sequential and two tickets created at the same moment can never
+// collide. addTicket reads the assigned id back from the insert result.
 
 // Maps Supabase snake_case rows → our camelCase Ticket shape
 function rowToTicket(row: Record<string, unknown>, comments: TicketComment[] = [], attachments: TicketAttachment[] = []): Ticket {
@@ -217,7 +218,6 @@ export function TicketsProvider({ children }: { children: ReactNode }) {
   }, [fetchTickets]);
 
   const addTicket: TicketsContextValue["addTicket"] = async (input) => {
-    const id = generateId();
     const now = new Date().toISOString();
 
     // Category-based auto-routing: try to hand this straight to whichever
@@ -226,8 +226,8 @@ export function TicketsProvider({ children }: { children: ReactNode }) {
     // an admin can still assign it manually from the ticket detail view.
     const matchedAgent = await pickAgentForCategory(input.category, tickets);
 
+    // No `id` here — the database fills it in from ticket_number_seq.
     const row = {
-      id,
       subject: input.subject,
       details: input.details ?? null,
       customer: input.customer,
@@ -245,10 +245,17 @@ export function TicketsProvider({ children }: { children: ReactNode }) {
       updated_at: now,
     };
 
-    const { error } = await supabase.from("tickets").insert(row);
+    // .select().single() returns the saved row, including the new ticket number
+    const { data: saved, error } = await supabase
+      .from("tickets")
+      .insert(row)
+      .select()
+      .single();
     if (error) throw error;
 
-    // Save attachments if any
+    const id = saved.id as string;
+
+    // Save attachments if any, linked to the number the database assigned
     if (input.attachments && input.attachments.length > 0) {
       const attachmentRows = input.attachments.map((a) => ({
         id: a.id,
@@ -258,11 +265,12 @@ export function TicketsProvider({ children }: { children: ReactNode }) {
         type: a.type,
         data_url: a.dataUrl,
       }));
-      await supabase.from("ticket_attachments").insert(attachmentRows);
+      const { error: attachError } = await supabase.from("ticket_attachments").insert(attachmentRows);
+      if (attachError) console.error("Failed to save attachments:", attachError);
     }
 
-    const newTicket = rowToTicket(row, [], input.attachments ?? []);
-    setTickets((prev) => [newTicket, ...prev]);
+    const newTicket = rowToTicket(saved, [], input.attachments ?? []);
+    setTickets((prev) => [newTicket, ...prev.filter((t) => t.id !== id)]);
     return newTicket;
   };
 
